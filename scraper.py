@@ -7,6 +7,9 @@ from lxml import html
 
 DOMAIN = 'https://en.wikipedia.org'
 REGEX = re.compile(r"^(\/wiki\/[^:#\s]+)(?:$|#)")
+Q = asyncio.Queue()
+MAX_DEPTH = 1
+MAX_WORKERS = 20
 
 async def get(session, url, timeout=10):
     with async_timeout.timeout(timeout):
@@ -20,22 +23,31 @@ def extract_urls(html_code):
     return {DOMAIN + x[0] for x in urls_list if x != []}
 
 
-async def test(loop):
-    url = 'https://en.wikipedia.org/wiki/Python_(programming_language)'
+async def worker(loop):
     async with aiohttp.ClientSession(loop=loop) as session:
-        print('Request sent for {}'.format(url))
-        html_code = await get(session, url)
-        print('html recieved')
-        urls = extract_urls(html_code)
-        return urls
+        while True:
+            depth, url = await Q.get()
+            if url == None:
+                break
+
+            print('Request sent for {}'.format(url))
+            urls = extract_urls(await get(session, url))
+            print('Done : {}'.format(url))
+
+            if depth + 1 > MAX_DEPTH:
+                for _ in range(MAX_WORKERS):
+                    Q.put_nowait((None, None))
+            else:
+                for url in urls:
+                    Q.put_nowait((depth + 1, url))
 
 
 def main():
+    Q.put_nowait((0, DOMAIN + '/wiki/Python_(programming_language)'))
     loop = asyncio.get_event_loop()
-    res = loop.run_until_complete(test(loop))
-    for i, u in enumerate(res):
-        print(i, u)
-    print(len(res))
+    workers = [worker(loop) for x in range(MAX_WORKERS)]
+    loop.run_until_complete(asyncio.wait(workers))
+    loop.close()
 
 
 if __name__ == '__main__':
