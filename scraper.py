@@ -1,4 +1,5 @@
 import re
+import json
 import asyncio
 import async_timeout
 from timeit import default_timer as timer
@@ -9,12 +10,14 @@ from lxml import html
 DOMAIN = 'https://en.wikipedia.org'
 REGEX = re.compile(r"^(\/wiki\/[^:#\s]+)(?:$|#)")
 Q = asyncio.Queue()
+
 MAX_DEPTH = 1
 MAX_RETRIES = 5
 MAX_WORKERS = 20
 
 count = 0
 cache = set()
+graph = {}
 
 async def get(session, url, timeout=10):
     with async_timeout.timeout(timeout):
@@ -29,7 +32,7 @@ def extract_urls(html_code):
 
 
 async def worker(loop):
-    global count
+    global count, cache, graph
     async with aiohttp.ClientSession(loop=loop) as session:
         while True:
             depth, url, retries = await Q.get()
@@ -42,15 +45,14 @@ async def worker(loop):
                 html_code = await get(session, url)
             except asyncio.TimeoutError:
                 if retries + 1 <= MAX_RETRIES:
-                    # print('Timeout on {} retrying...'.format(url))
                     Q.put_nowait((depth, url, retries + 1))
                     continue
 
-            # print('Request sent for {}'.format(url))
             urls = extract_urls(html_code)
             count += 1
             cache.add(url)
-            # print('Done : {}'.format(url))
+            graph[url.split('wiki/')[1]] = [x.split('wiki/')[1] for x in urls]
+            print('Done : {}'.format(url))
 
             if depth + 1 <= MAX_DEPTH:
                 for url in urls:
@@ -66,6 +68,9 @@ def main():
     workers = [worker(loop) for x in range(MAX_WORKERS)]
     loop.run_until_complete(asyncio.wait(workers))
     loop.close()
+
+    with open('graph.json', 'w') as fp:
+        json.dump(graph, fp)
 
 
 if __name__ == '__main__':
