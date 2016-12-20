@@ -1,5 +1,7 @@
 import re
+import sys
 import json
+import signal
 import asyncio
 import argparse
 import async_timeout
@@ -15,6 +17,7 @@ Q = asyncio.Queue()
 MAX_DEPTH = 1
 MAX_RETRIES = 5
 MAX_WORKERS = 20
+FILENAME = 'graph.json'
 
 count = 0
 cache = set()
@@ -72,8 +75,13 @@ def main(start_url):
     output_json()
 
 
+def exit_early(signal, frame):
+    output_json()
+    sys.exit(0)
+
+
 def output_json():
-    with open('graph.json', 'w') as fp:
+    with open(FILENAME, 'w') as fp:
         json.dump(graph, fp)
 
 
@@ -93,13 +101,18 @@ if __name__ == '__main__':
     parser.add_argument(
         '-u', '--url', type=str,
         help='Starting url', default=None)
+    parser.add_argument(
+        '-f', '--file', type=str,
+        help='Filename to save the json in', default=None)
 
     args = parser.parse_args()
     MAX_DEPTH = args.depth if args.depth else MAX_DEPTH
     MAX_WORKERS = args.workers if args.workers else MAX_WORKERS
     MAX_RETRIES = args.retries if args.retries else MAX_RETRIES
+    FILENAME = args.file if args.file else FILENAME
     start_url = args.url if args.url else '/wiki/Python_(programming_language)'
 
+    signal.signal(signal.SIGINT, exit_early)
     print('Started crawling...')
     start = timer()
     main(start_url)
