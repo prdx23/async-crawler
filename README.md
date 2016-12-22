@@ -18,10 +18,10 @@ These tests were run on a free tier [AWS EC2](https://aws.amazon.com/ec2/) serve
 <br>Current results :
 ```zsh
 $ >> python3 scraper.py -d 1 -f graph-sm.json -w 20
-Time Taken for 494 requests : 5.746156081557274 sec
+Time Taken for 494 requests : 5.484668092802167 sec
 
 $ >> python3 scraper.py -d 2 -f graph-md.json -w 20    
-Time Taken for 36318 requests : 389.2725637294352 sec
+Time Taken for 36320 requests : 384.6882331715897 sec
 ```
 The two json files created in above test are present in [data.tar.gz](https://github.com/Arsh23/async-crawler/blob/master/data.tar.gz) and are open-source. Feel free to use them anywhere.
 
