@@ -35,7 +35,7 @@ def extract_urls(html_code):
     return {DOMAIN + x[0] for x in urls_list if x != []}
 
 
-async def worker(loop):
+async def worker(loop, sem):
     global count, cache, graph
     async with aiohttp.ClientSession(loop=loop) as session:
         while True:
@@ -46,30 +46,35 @@ async def worker(loop):
                 continue
 
             try:
-                html_code = await get(session, url)
-            except asyncio.TimeoutError:
+                async with sem:
+                    html_code = await get(session, url)
+            except Exception as e:
                 if retries + 1 <= MAX_RETRIES:
                     Q.put_nowait((depth, url, retries + 1))
                     continue
+                else:
+                    print('[{}] ERROR : {}'.format(url, repr(e)))
+            else:
+                urls = extract_urls(html_code)
+                count += 1
+                cache.add(url)
+                graph[url.split('wiki/')[1]] = [x.split('wiki/')[1]
+                                                for x in urls]
+                # print('Crawled : {}'.format(url))
 
-            urls = extract_urls(html_code)
-            count += 1
-            cache.add(url)
-            graph[url.split('wiki/')[1]] = [x.split('wiki/')[1] for x in urls]
-            print('Crawled : {}'.format(url))
-
-            if depth + 1 <= MAX_DEPTH:
-                for url in urls:
-                    Q.put_nowait((depth + 1, url, retries))
-            elif depth + 1 > MAX_DEPTH and Q.qsize() == 1:
-                for _ in range(MAX_WORKERS):
-                    Q.put_nowait((None, None, None))
+                if depth + 1 <= MAX_DEPTH:
+                    for url in urls:
+                        Q.put_nowait((depth + 1, url, retries))
+                elif depth + 1 > MAX_DEPTH and Q.qsize() == 1:
+                    for _ in range(MAX_WORKERS):
+                        Q.put_nowait((None, None, None))
 
 
 def main(start_url):
     Q.put_nowait((0, DOMAIN + start_url, 0))
     loop = asyncio.get_event_loop()
-    workers = [worker(loop) for x in range(MAX_WORKERS)]
+    sem = asyncio.Semaphore(MAX_WORKERS)
+    workers = [worker(loop, sem) for x in range(MAX_WORKERS)]
     loop.run_until_complete(asyncio.wait(workers))
     loop.close()
     output_json()
