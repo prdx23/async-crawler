@@ -8,10 +8,11 @@ from lxml import html
 
 class Crawler:
 
-    def __init__(self, *, domain, regexp, max_depth, max_workers):
+    def __init__(self, *, domain, regexp, max_depth, max_workers, max_retries):
         self.domain = domain
         self.regex = re.compile(regexp)
         self.max_depth = max_depth
+        self.max_retries = max_retries
         self.max_workers = max_workers
         self.Q = asyncio.Queue()
         self.cache = set()
@@ -44,20 +45,20 @@ class Crawler:
     async def run(self):
         async with aiohttp.ClientSession(loop=self.loop) as session:
             self.session = session
-            workers = [self.worker() for _ in range(self.max_workers)]
+            workers = (self.worker() for _ in range(self.max_workers))
+            tasks = [self.loop.create_task(x) for x in workers]
+            #  for w in workers:
+                #  asyncio.ensure_future(w)
 
-            for w in workers:
-                asyncio.ensure_future(w)
-
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             await self.Q.join()
-            for w in workers:
-                w.cancel()
-            self.loop.close()
+            for task in tasks:
+                task.cancel()
 
     def start(self, start_url):
         self.Q.put_nowait((start_url, 0))
         self.loop.run_until_complete(asyncio.gather(self.run()))
+        self.loop.close()
 
 
 if __name__ == '__main__':
@@ -65,8 +66,9 @@ if __name__ == '__main__':
     options = {
         'domain': 'https://en.wikipedia.org',
         'regexp': r"^(\/wiki\/[^:#\s]+)(?:$|#)",
-        'max_depth': 1,
-        'max_workers': 100,
+        'max_depth': 0,
+        'max_workers': 10,
+        'max_retries': 5,
     }
     c = Crawler(**options)
     c.start(url)
