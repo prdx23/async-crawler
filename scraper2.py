@@ -37,6 +37,7 @@ class Crawler:
             url, depth, retries = await self.Q.get()
             if url in self.cache:
                 print(f'Loaded from cache {url}')
+                self.Q.task_done()
                 continue
             try:
                 new_urls = await self.extract_urls(url)
@@ -47,13 +48,13 @@ class Crawler:
                 else:
                     print(f'Error in {url}: {repr(e)}')
             else:
-                self.count += 1
                 self.cache.add(url)
-                self.Q.task_done()
+                self.count += 1
                 print(f'Depth [{depth}], Retry [{retries}]: Downloaded {url}')
                 for url in new_urls:
                     if depth+1 <= self.max_depth:
                         self.Q.put_nowait((url, depth + 1, retries))
+            self.Q.task_done()
 
 
     async def run(self):
