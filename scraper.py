@@ -1,125 +1,103 @@
 import re
-import sys
-import json
-import signal
 import asyncio
-import argparse
 import async_timeout
 from timeit import default_timer as timer
 
 import aiohttp
 from lxml import html
-
-DOMAIN = 'https://en.wikipedia.org'
-REGEX = re.compile(r"^(\/wiki\/[^:#\s]+)(?:$|#)")
-Q = asyncio.Queue()
-
-MAX_DEPTH = 1
-MAX_RETRIES = 5
-MAX_WORKERS = 20
-FILENAME = 'graph.json'
-
-count = 0
-cache = set()
-graph = {}
-
-async def get(session, url, timeout=10):
-    with async_timeout.timeout(timeout):
-        async with session.get(url) as response:
-            return await response.text()
+import motor.motor_asyncio
 
 
-def extract_urls(html_code):
-    tree = html.fromstring(html_code)
-    urls_list = map(REGEX.findall, tree.xpath('//a/@href'))
-    return {DOMAIN + x[0] for x in urls_list if x != []}
+class Crawler:
 
+    client = motor.motor_asyncio.AsyncIOMotorClient()
+    db = client.graph
 
-async def worker(session, loop, sem):
-    global count, cache, graph
-    while True:
-        depth, url, retries = await Q.get()
-        if url == None:
-            break
-        if url in cache:
-            continue
+    def __init__(self, *, domain, regexp, max_depth,
+                 max_workers, max_retries, dbname):
+        self.domain = domain
+        self.max_depth = max_depth
+        self.max_retries = max_retries
+        self.max_workers = max_workers
+        self.Q = asyncio.Queue()
+        self.db_Q = asyncio.Queue()
+        self.cache = set()
+        self.count = 0
+        self.regex = re.compile(regexp)
+        self.loop = asyncio.get_event_loop()
+        self.collection = self.db[dbname]
 
-        try:
-            async with sem:
-                html_code = await get(session, url)
-        except Exception as e:
-            if retries + 1 <= MAX_RETRIES:
-                Q.put_nowait((depth, url, retries + 1))
+    async def get(self, url, timeout):
+        with async_timeout.timeout(timeout):
+            async with self.session.get(url) as response:
+                return await response.text()
+
+    async def extract_urls(self, url, timeout=10):
+        tree = html.fromstring(await self.get(self.domain + url, timeout))
+        urls_list = map(self.regex.findall, tree.xpath('//a/@href'))
+        return {x[0] for x in urls_list if x != []}
+
+    async def worker(self):
+        while True:
+            url, depth, retries, parent_url = await self.Q.get()
+            if url in self.cache:
+                print(f'Loaded from cache {url}')
+                self.Q.task_done()
                 continue
+            try:
+                new_urls = await self.extract_urls(url)
+            except Exception as e:
+                if retries <= self.max_retries:
+                    print(f'Retrying {url}')
+                    self.Q.put_nowait((url, depth, retries + 1, parent_url))
+                else:
+                    print(f'Error in {url}: {repr(e)}')
             else:
-                print('[{}] ERROR : {}'.format(url, repr(e)))
-        else:
-            urls = extract_urls(html_code)
-            count += 1
-            cache.add(url)
-            graph[url.split('wiki/')[1]] = [x.split('wiki/')[1] for x in urls]
-            # print('Crawled : {}'.format(url))
+                self.cache.add(url)
+                self.count += 1
+                self.db_Q.put_nowait({parent_url: url})
+                print(f'Depth [{depth}], Retry [{retries}]: Visited {url}')
+                for x in new_urls:
+                    if depth+1 <= self.max_depth:
+                        self.Q.put_nowait((x, depth + 1, retries, url))
+            self.Q.task_done()
 
-            if depth + 1 <= MAX_DEPTH:
-                for url in urls:
-                    Q.put_nowait((depth + 1, url, retries))
-            elif depth + 1 > MAX_DEPTH and Q.qsize() == 1:
-                for _ in range(MAX_WORKERS):
-                    Q.put_nowait((None, None, None))
+    async def run(self):
+        async with aiohttp.ClientSession(loop=self.loop) as session:
+            self.session = session
+            workers = (self.worker() for _ in range(self.max_workers))
+            tasks = [self.loop.create_task(x) for x in workers]
+            tasks += [self.loop.create_task(self.write_to_db())]
+            await asyncio.sleep(5)
+            await self.Q.join()
+            await self.db_Q.join()
+            for task in tasks:
+                task.cancel()
 
+    def start(self, start_url):
+        self.Q.put_nowait((start_url, 0, 0, start_url))
+        self.start_time = timer()
+        self.loop.run_until_complete(asyncio.gather(self.run()))
+        self.loop.close()
+        print(f"Crawler for {self.domain} Finished !")
+        print(f"It took {timer() - self.start_time} secs "
+              f"to complete {self.count} requests")
 
-async def main(loop):
-    sem = asyncio.Semaphore(MAX_WORKERS)
-    async with aiohttp.ClientSession(loop=loop) as session:
-        workers = [worker(session, loop, sem) for x in range(MAX_WORKERS)]
-        await asyncio.wait(workers)
-    output_json()
-
-
-def exit_early(signal, frame):
-    output_json()
-    sys.exit(0)
-
-
-def output_json():
-    with open(FILENAME, 'w') as fp:
-        json.dump(graph, fp)
+    async def write_to_db(self):
+        while True:
+            await self.collection.insert_one(await self.db_Q.get())
+            self.db_Q.task_done()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='A recursive wikipidia crawler which creates a graph of '
-        'connected pages')
-    parser.add_argument(
-        '-d', '--depth', type=int,
-        help='Max recursion depth (default=1)', default=None)
-    parser.add_argument(
-        '-w', '--workers', type=int,
-        help='Max concurrent Workers (default=1)', default=None)
-    parser.add_argument(
-        '-r', '--retries', type=int,
-        help='Max no of retries for timeout errors (default=1)', default=None)
-    parser.add_argument(
-        '-u', '--url', type=str,
-        help='Starting url', default=None)
-    parser.add_argument(
-        '-f', '--file', type=str,
-        help='Filename to save the json in', default=None)
-
-    args = parser.parse_args()
-    MAX_DEPTH = args.depth if args.depth else MAX_DEPTH
-    MAX_WORKERS = args.workers if args.workers else MAX_WORKERS
-    MAX_RETRIES = args.retries if args.retries else MAX_RETRIES
-    FILENAME = args.file if args.file else FILENAME
-    start_url = args.url if args.url else '/wiki/Python_(programming_language)'
-
-    signal.signal(signal.SIGINT, exit_early)
-    print('Started crawling...')
-    start = timer()
-    Q.put_nowait((0, DOMAIN + start_url, 0))
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main(loop))
-    loop.close()
-    end = timer()
-    print('Time Taken for {} requests : {} sec'.format(count, end - start))
-
+    url = '/wiki/Python_(programming_language)'
+    options = {
+        'domain': 'https://en.wikipedia.org',
+        'regexp': r"^(\/wiki\/[^:#\s]+)(?:$|#)",
+        'max_depth': 1,
+        'max_workers': 30,
+        'max_retries': 5,
+        'dbname': 'test',
+    }
+    c = Crawler(**options)
+    c.start(url)

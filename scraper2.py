@@ -1,40 +1,45 @@
 import re
 import asyncio
 import async_timeout
+from timeit import default_timer as timer
 
 import aiohttp
 from lxml import html
+import motor.motor_asyncio
 
 
 class Crawler:
 
-    def __init__(self, *, domain, regexp, max_depth, max_workers, max_retries):
+    client = motor.motor_asyncio.AsyncIOMotorClient()
+    db = client.graph
+
+    def __init__(self, *, domain, regexp, max_depth,
+                 max_workers, max_retries, dbname):
         self.domain = domain
-        self.regex = re.compile(regexp)
         self.max_depth = max_depth
         self.max_retries = max_retries
         self.max_workers = max_workers
         self.Q = asyncio.Queue()
+        self.db_Q = asyncio.Queue()
         self.cache = set()
         self.count = 0
+        self.regex = re.compile(regexp)
         self.loop = asyncio.get_event_loop()
-
+        self.collection = self.db[dbname]
 
     async def get(self, url, timeout):
         with async_timeout.timeout(timeout):
             async with self.session.get(url) as response:
                 return await response.text()
 
-
     async def extract_urls(self, url, timeout=10):
-        tree = html.fromstring(await self.get(url, timeout))
+        tree = html.fromstring(await self.get(self.domain + url, timeout))
         urls_list = map(self.regex.findall, tree.xpath('//a/@href'))
-        return {self.domain + x[0] for x in urls_list if x != []}
-
+        return {x[0] for x in urls_list if x != []}
 
     async def worker(self):
         while True:
-            url, depth, retries = await self.Q.get()
+            url, depth, retries, parent_url = await self.Q.get()
             if url in self.cache:
                 print(f'Loaded from cache {url}')
                 self.Q.task_done()
@@ -44,44 +49,55 @@ class Crawler:
             except Exception as e:
                 if retries <= self.max_retries:
                     print(f'Retrying {url}')
-                    self.Q.put_nowait((url, depth, retries + 1))
+                    self.Q.put_nowait((url, depth, retries + 1, parent_url))
                 else:
                     print(f'Error in {url}: {repr(e)}')
             else:
                 self.cache.add(url)
                 self.count += 1
-                print(f'Depth [{depth}], Retry [{retries}]: Downloaded {url}')
-                for url in new_urls:
+                self.db_Q.put_nowait({parent_url: url})
+                print(f'Depth [{depth}], Retry [{retries}]: Visited {url}')
+                for x in new_urls:
                     if depth+1 <= self.max_depth:
-                        self.Q.put_nowait((url, depth + 1, retries))
+                        self.Q.put_nowait((x, depth + 1, retries, url))
             self.Q.task_done()
-
 
     async def run(self):
         async with aiohttp.ClientSession(loop=self.loop) as session:
             self.session = session
             workers = (self.worker() for _ in range(self.max_workers))
             tasks = [self.loop.create_task(x) for x in workers]
+            tasks += [self.loop.create_task(self.write_to_db())]
             await asyncio.sleep(5)
             await self.Q.join()
+            await self.db_Q.join()
             for task in tasks:
                 task.cancel()
 
-
     def start(self, start_url):
-        self.Q.put_nowait((start_url, 0, 0))
+        self.Q.put_nowait((start_url, 0, 0, start_url))
+        self.start_time = timer()
         self.loop.run_until_complete(asyncio.gather(self.run()))
         self.loop.close()
+        print(f"Crawler for {self.domain} Finished !")
+        print(f"It took {timer() - self.start_time} secs "
+              f"to complete {self.count} requests")
+
+    async def write_to_db(self):
+        while True:
+            await self.collection.insert_one(await self.db_Q.get())
+            self.db_Q.task_done()
 
 
 if __name__ == '__main__':
-    url = 'https://en.wikipedia.org/wiki/Python_(programming_language)'
+    url = '/wiki/Python_(programming_language)'
     options = {
         'domain': 'https://en.wikipedia.org',
         'regexp': r"^(\/wiki\/[^:#\s]+)(?:$|#)",
         'max_depth': 1,
         'max_workers': 30,
         'max_retries': 5,
+        'dbname': 'test',
     }
     c = Crawler(**options)
     c.start(url)
