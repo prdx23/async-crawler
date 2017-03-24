@@ -6,6 +6,7 @@ from timeit import default_timer as timer
 import aiohttp
 from lxml import html
 import motor.motor_asyncio
+from pymongo import TEXT
 
 
 class Crawler:
@@ -26,6 +27,7 @@ class Crawler:
         self.regex = re.compile(regexp)
         self.loop = asyncio.get_event_loop()
         self.collection = self.db[dbname]
+        self.collection.create_index([('p_url', TEXT)])
 
     async def get(self, url, timeout):
         with async_timeout.timeout(timeout):
@@ -42,6 +44,7 @@ class Crawler:
             url, depth, retries, parent_url = await self.Q.get()
             if url in self.cache:
                 print(f'Loaded from cache {url}')
+                self.db_Q.put_nowait((parent_url, url))
                 self.Q.task_done()
                 continue
             try:
@@ -55,10 +58,10 @@ class Crawler:
             else:
                 self.cache.add(url)
                 self.count += 1
-                self.db_Q.put_nowait({parent_url: url})
+                self.db_Q.put_nowait((parent_url, url))
                 print(f'Depth [{depth}], Retry [{retries}]: Visited {url}')
-                for x in new_urls:
-                    if depth+1 <= self.max_depth:
+                if depth+1 <= self.max_depth:
+                    for x in new_urls:
                         self.Q.put_nowait((x, depth + 1, retries, url))
             self.Q.task_done()
 
@@ -75,7 +78,7 @@ class Crawler:
                 task.cancel()
 
     def start(self, start_url):
-        self.Q.put_nowait((start_url, 0, 0, start_url))
+        self.Q.put_nowait((start_url, 0, 0, 'root'))
         self.start_time = timer()
         self.loop.run_until_complete(asyncio.gather(self.run()))
         self.loop.close()
@@ -85,7 +88,12 @@ class Crawler:
 
     async def write_to_db(self):
         while True:
-            await self.collection.insert_one(await self.db_Q.get())
+            p_url, c_url = await self.db_Q.get()
+            await self.collection.find_one_and_update(
+                {'$text': {'$search': p_url}, 'c_url': c_url}, {
+                    '$inc': {'count': 1},
+                    '$setOnInsert': {'p_url': p_url, 'c_url': c_url},
+                }, upsert=True)
             self.db_Q.task_done()
 
 
@@ -97,7 +105,7 @@ if __name__ == '__main__':
         'max_depth': 1,
         'max_workers': 30,
         'max_retries': 5,
-        'dbname': 'test',
+        'dbname': 'test2',
     }
     c = Crawler(**options)
     c.start(url)
