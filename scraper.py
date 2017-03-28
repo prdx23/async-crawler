@@ -68,9 +68,9 @@ class Crawler:
     async def run(self):
         async with aiohttp.ClientSession(loop=self.loop) as session:
             self.session = session
-            workers = (self.worker() for _ in range(self.max_workers))
+            workers = [self.worker() for _ in range(self.max_workers)]
+            workers += [self.write_to_db() for _ in range(self.max_workers)]
             tasks = [self.loop.create_task(x) for x in workers]
-            tasks += [self.loop.create_task(self.write_to_db())]
             await asyncio.sleep(5)
             await self.Q.join()
             await self.db_Q.join()
@@ -89,11 +89,13 @@ class Crawler:
     async def write_to_db(self):
         while True:
             p_url, c_url = await self.db_Q.get()
+            p_url, c_url = p_url.replace('.', '#'), c_url.replace('.', '#')
             await self.collection.find_one_and_update(
                 {'$text': {'$search': p_url}, 'c_url': c_url}, {
                     '$inc': {'count': 1},
                     '$setOnInsert': {'p_url': p_url, 'c_url': c_url},
                 }, upsert=True)
+            print(f'Write to db: {c_url}')
             self.db_Q.task_done()
 
 
